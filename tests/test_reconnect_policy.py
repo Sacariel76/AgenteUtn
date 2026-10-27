@@ -1,0 +1,50 @@
+
+import sys
+import unittest
+from pathlib import Path
+
+sys.path.insert(
+    0, str(Path(__file__).resolve().parents[1] / "src")
+)
+
+from reconnect_policy import reconnect_decision
+
+
+class TestReconnectPolicy(unittest.TestCase):
+
+    def test_busy_permite_reintento(self):
+        result = reconnect_decision(
+            {"type": "error", "code": "busy"}
+        )
+        self.assertTrue(result["retry"])
+        self.assertEqual(result["delay"], 5)
+
+    def test_auth_no_reconecta(self):
+        result = reconnect_decision(
+            {"type": "error", "code": "auth"}
+        )
+        self.assertFalse(result["retry"])
+
+    def test_bye_no_reconecta(self):
+        result = reconnect_decision(
+            {"type": "bye", "reason": "kicked"}
+        )
+        self.assertFalse(result["retry"])
+
+    def test_perdida_conexion(self):
+        result = reconnect_decision(
+            {"type": "connection_lost"},
+            attempts=1
+        )
+        self.assertTrue(result["retry"])
+
+    def test_maximo_intentos(self):
+        result = reconnect_decision(
+            {"type": "connection_lost"},
+            attempts=3
+        )
+        self.assertFalse(result["retry"])
+
+
+if __name__ == "__main__":
+    unittest.main()

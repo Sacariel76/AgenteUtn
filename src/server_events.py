@@ -1,0 +1,44 @@
+
+"""Interpretación de eventos del protocolo C2."""
+
+def handle_server_event(message: dict) -> dict:
+    if not isinstance(message, dict):
+        raise ValueError("El mensaje debe ser un objeto")
+
+    message_type = message.get("type")
+
+    if message_type == "error":
+        code = message.get("code")
+
+        if code == "auth":
+            return {
+                "action": "disconnect",
+                "reconnect": False,
+                "reason": "Autenticación rechazada",
+            }
+
+        if code == "busy":
+            return {
+                "action": "disconnect",
+                "reconnect": True,
+                "reason": "Servidor ocupado",
+            }
+
+        return {
+            "action": "disconnect",
+            "reconnect": False,
+            "reason": "Error desconocido",
+        }
+
+    if message_type == "bye":
+        return {
+            "action": "disconnect",
+            "reconnect": False,
+            "reason": message.get("reason", "Expulsado"),
+        }
+
+    return {
+        "action": "ignore",
+        "reconnect": False,
+        "reason": "Mensaje no aplicable",
+    }
