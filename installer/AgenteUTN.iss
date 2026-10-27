@@ -1,6 +1,6 @@
 
 #define MyAppName "AgenteUTN"
-#define MyAppVersion "1.5"
+#define MyAppVersion "1.8"
 #define MyAppExeName "AgenteUTN.exe"
 
 [Setup]

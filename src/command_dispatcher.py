@@ -3,7 +3,7 @@
 
 from commands import handle_command
 
-ALLOWED_COMMANDS = {"ping", "info", "stop"}
+ALLOWED_COMMANDS = {"ping", "info", "echo", "stop"}
 
 
 def dispatch_command(message: dict) -> dict:

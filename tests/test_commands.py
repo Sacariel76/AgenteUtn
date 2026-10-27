@@ -31,9 +31,21 @@ class TestCommands(unittest.TestCase):
             result["data"]["stopping"], True
         )
 
-    def test_comando_desconocido(self):
+    def test_echo(self):
         result = handle_command({
             "id": "004",
+            "name": "echo",
+            "args": {"text": "hola laboratorio"},
+        })
+        self.assertEqual(result["status"], "ok")
+        self.assertEqual(
+            result["data"]["text"],
+            "hola laboratorio",
+        )
+
+    def test_comando_desconocido(self):
+        result = handle_command({
+            "id": "005",
             "name": "desconocido",
         })
         self.assertEqual(result["status"], "error")

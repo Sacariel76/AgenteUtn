@@ -35,6 +35,15 @@ def handle_command(message: dict) -> dict:
             "data": {"stopping": True},
         }
 
+    if name == "echo":
+        args = message.get("args") or {}
+        return {
+            "type": "result",
+            "id": command_id,
+            "status": "ok",
+            "data": {"text": str(args.get("text", ""))},
+        }
+
     return {
         "type": "result",
         "id": command_id,

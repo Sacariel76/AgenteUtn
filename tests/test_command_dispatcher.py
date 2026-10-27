@@ -36,11 +36,22 @@ class TestCommandDispatcher(unittest.TestCase):
         self.assertEqual(result["status"], "ok")
         self.assertIsInstance(result["data"], dict)
 
+    def test_echo(self):
+        result = dispatch_command({
+            "type": "command",
+            "id": "abc126",
+            "name": "echo",
+            "args": {"text": "hola"},
+        })
+
+        self.assertEqual(result["status"], "ok")
+        self.assertEqual(result["data"]["text"], "hola")
+
     def test_comando_no_permitido(self):
         result = dispatch_command({
             "type": "command",
             "id": "abc125",
-            "name": "load",
+            "name": "desconocido",
             "args": {},
         })
 

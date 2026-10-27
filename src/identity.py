@@ -5,7 +5,7 @@ import socket
 import time
 
 
-VERSION = "1.6"
+VERSION = "1.8"
 
 
 def build_hello(agent_id: str, secret: str = "") -> dict:

